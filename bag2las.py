@@ -1438,7 +1438,7 @@ def get_user_choice():
                 # Режим директории
                 directory = input("📂 Введите путь к директории (или Enter для текущей): ").strip()
                 if not directory:
-                    directory = "/Users/devitt/Documents/bag2laz/"
+                    directory = os.path.dirname(os.path.abspath(__file__))
                 
                 if not os.path.isdir(directory):
                     print(f"❌ Директория не найдена: {directory}")
