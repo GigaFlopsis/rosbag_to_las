@@ -93,7 +93,7 @@ def choose_pointcloud2_topic(bag_file):
                 if topic in bag_info.topics:
                     topic_info = bag_info.topics[topic]
                     frequency = topic_info.frequency
-                    freq_str = f"~{frequency:.1f} Hz" if frequency > 0 else "unknown Hz"
+                    freq_str = f"~{frequency:.1f} Hz" if frequency is not None and frequency > 0 else "unknown Hz"
                 else:
                     freq_str = "unknown Hz"
         except:
@@ -265,7 +265,7 @@ def choose_odometry_topic(bag_file):
                 if topic in bag_info.topics:
                     topic_info = bag_info.topics[topic]
                     frequency = topic_info.frequency
-                    freq_str = f"~{frequency:.1f} Hz" if frequency > 0 else "unknown Hz"
+                    freq_str = f"~{frequency:.1f} Hz" if frequency is not None and frequency > 0 else "unknown Hz"
                 else:
                     freq_str = "unknown Hz"
         except:
@@ -536,7 +536,8 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None):
             topic_info = bag_info.topics[pointcloud2_topic]
             print(f"   • PointCloud2 messages: {topic_info.message_count}")
             print(f"   • Message type: {topic_info.msg_type}")
-            print(f"   • Frequency: ~{topic_info.frequency:.2f} Hz")
+            freq_display = f"~{topic_info.frequency:.2f} Hz" if topic_info.frequency is not None else "unknown Hz"
+            print(f"   • Frequency: {freq_display}")
 
         # Get the total number of messages in the bag file
         print("📈 Counting PointCloud2 messages...")
@@ -1297,8 +1298,8 @@ def analyze_bag_topics(bag_file):
                 else:
                     topic_categories['other'].append(topic_name)
                 
-                # Format frequency
-                freq_str = f"{frequency:.1f} Hz" if frequency > 0 else "0 Hz"
+                # Format frequency with None check
+                freq_str = f"{frequency:.1f} Hz" if frequency is not None and frequency > 0 else "0 Hz"
                 
                 # Truncate long topic names for display
                 display_topic = topic_name[:38] + ".." if len(topic_name) > 40 else topic_name
@@ -1318,7 +1319,8 @@ def analyze_bag_topics(bag_file):
                 for topic in topic_categories['sensor_msgs/PointCloud2']:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # Odometry topics
@@ -1327,7 +1329,8 @@ def analyze_bag_topics(bag_file):
                 for topic in topic_categories['nav_msgs/Odometry']:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # Image topics
@@ -1337,8 +1340,9 @@ def analyze_bag_topics(bag_file):
                 for topic in image_topics:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
                     msg_type = bag_info.topics[topic].msg_type.split('/')[-1]
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz, {msg_type})")
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display}, {msg_type})")
                 print()
             
             # IMU topics
@@ -1347,7 +1351,8 @@ def analyze_bag_topics(bag_file):
                 for topic in topic_categories['sensor_msgs/Imu']:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # TF topics
@@ -1357,7 +1362,8 @@ def analyze_bag_topics(bag_file):
                 for topic in tf_topics:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # Control topics
@@ -1366,7 +1372,8 @@ def analyze_bag_topics(bag_file):
                 for topic in topic_categories['geometry_msgs/Twist']:
                     count = bag_info.topics[topic].message_count
                     freq = bag_info.topics[topic].frequency
-                    print(f"   • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                    freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                    print(f"   • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # Other topics
@@ -1385,7 +1392,8 @@ def analyze_bag_topics(bag_file):
                     for topic in topics:
                         count = bag_info.topics[topic].message_count
                         freq = bag_info.topics[topic].frequency
-                        print(f"      • {topic} ({count:,} сообщений, {freq:.1f} Hz)")
+                        freq_display = f"{freq:.1f} Hz" if freq is not None and freq > 0 else "0 Hz"
+                        print(f"      • {topic} ({count:,} сообщений, {freq_display})")
                 print()
             
             # Summary statistics
