@@ -5,6 +5,7 @@ import sensor_msgs.point_cloud2 as pc2
 import numpy as np
 from collections import defaultdict
 import time
+import sys  # Добавлен импорт для работы с аргументами командной строки
 
 def get_pointcloud2_topics(bag_file):
     """
@@ -1105,18 +1106,25 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None):
                 print(f"   • Estimated scan duration: {estimated_duration:.1f} seconds")
                 print(f"   • Time span vs estimated: {time_diff:.1f}s vs {estimated_duration:.1f}s")
             
-            # Check if GPS time values are reasonable
+            # Check if GPS time values are reasonable and normalize if needed
             if np.all(gps_time_array == 0):
                 print("   ⚠️  WARNING: All GPS time values are zero")
-            elif np.max(gps_time_array) < 1000:
+            elif np.max(gps_time_array) < 1:
                 print("   ⚠️  WARNING: GPS time values seem to be relative (too small)")
-            elif np.min(gps_time_array) > 1e9:
-                print("   ℹ️  GPS time appears to be Unix timestamp")
-                # Convert to GPS time if it's Unix timestamp
-                unix_epoch_to_gps = 315964800  # seconds between Unix epoch and GPS epoch
-                print("   🔄 Converting Unix timestamp to GPS time...")
-                gps_time_array = gps_time_array - unix_epoch_to_gps
-                print(f"   • GPS time after conversion: {np.min(gps_time_array):.6f} to {np.max(gps_time_array):.6f}")
+            elif np.min(gps_time_array) > 100:
+                # Always normalize large GPS time values for CloudCompare compatibility
+                print("   ℹ️  GPS time values are large - normalizing for CloudCompare compatibility")
+                min_gps_time = np.min(gps_time_array)
+                max_gps_time_orig = np.max(gps_time_array)
+                gps_time_array = gps_time_array - min_gps_time
+                print(f"   🔄 Normalizing GPS time to relative values starting from 0...")
+                print(f"   • Original range: {min_gps_time:.6f} to {max_gps_time_orig:.6f}")
+                print(f"   • Normalized range: 0.0 to {np.max(gps_time_array):.6f}")
+                print(f"   • Duration: {np.max(gps_time_array):.2f} seconds ({np.max(gps_time_array)/60:.2f} minutes)")
+                print(f"   • This allows proper time-based filtering in CloudCompare")
+            else:
+                print(f"   ℹ️  GPS time values are in reasonable range (0-100)")
+                print(f"   • Range: {np.min(gps_time_array):.6f} to {np.max(gps_time_array):.6f}")
             
             try:
                 # Ensure GPS time is in the correct format for LAS
@@ -1633,8 +1641,28 @@ if __name__ == "__main__":
     print("Версия 2.0 - Поддержка выбора файлов и директорий")
     
     try:
-        # Получить выбор пользователя
-        mode, path = get_user_choice()
+        # Проверить аргументы командной строки
+        if len(sys.argv) > 1:
+            # Если передан аргумент - это путь к файлу
+            file_path = sys.argv[1]
+            
+            # Проверить существование файла
+            if not os.path.isfile(file_path):
+                print(f"❌ Файл не найден: {file_path}")
+                sys.exit(1)
+            
+            # Проверить расширение файла
+            if not file_path.endswith(".bag"):
+                print(f"❌ Файл должен иметь расширение .bag: {file_path}")
+                sys.exit(1)
+            
+            print(f"📂 Автоматически выбран файл: {file_path}")
+            mode = "file"
+            path = file_path
+            
+        else:
+            # Получить выбор пользователя
+            mode, path = get_user_choice()
         
         if mode == "file":
             # Обработка отдельного файла

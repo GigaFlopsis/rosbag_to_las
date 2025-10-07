@@ -7,10 +7,64 @@ from collections import defaultdict
 import time
 from scipy.spatial.distance import cdist
 from scipy.interpolate import interp1d
+from scipy.spatial import KDTree
+from sklearn.neighbors import NearestNeighbors
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================================================
 # TRANSFORMATION FUNCTIONS
 # ============================================================================
+
+def slerp_quaternions(q1, q2, t):
+    """
+    Spherical Linear Interpolation (SLERP) for quaternions.
+    
+    Parameters:
+        q1: Starting quaternion [x, y, z, w]
+        q2: Ending quaternion [x, y, z, w]
+        t: Interpolation parameter [0, 1]
+        
+    Returns:
+        np.array: Interpolated quaternion
+    """
+    # Ensure inputs are numpy arrays
+    q1 = np.array(q1, dtype=np.float64)
+    q2 = np.array(q2, dtype=np.float64)
+    
+    # Normalize quaternions
+    q1 = q1 / np.linalg.norm(q1)
+    q2 = q2 / np.linalg.norm(q2)
+    
+    # Compute the cosine of the angle between them
+    dot = np.dot(q1, q2)
+    
+    # If the dot product is negative, slerp won't take the shorter path
+    # So we negate one quaternion to correct this
+    if dot < 0.0:
+        q2 = -q2
+        dot = -dot
+    
+    # If the inputs are too close for comfort, linearly interpolate
+    DOT_THRESHOLD = 0.9995
+    if dot > DOT_THRESHOLD:
+        result = q1 + t * (q2 - q1)
+        return result / np.linalg.norm(result)
+    
+    # Calculate the angle between the quaternions
+    theta_0 = np.arccos(np.abs(dot))  # theta_0 = angle between input vectors
+    sin_theta_0 = np.sin(theta_0)     # compute this only once
+    theta = theta_0 * t               # theta = angle between v0 and result
+    sin_theta = np.sin(theta)         # compute this only once
+    
+    # q2_perp = normalize(q2 - q1 * dot(q1, q2))
+    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0  # == sin(theta_0 - theta) / sin(theta_0)
+    s1 = sin_theta / sin_theta_0
+    
+    return s0 * q1 + s1 * q2
 
 def quaternion_to_rotation_matrix(quaternion):
     """
@@ -38,13 +92,14 @@ def quaternion_to_rotation_matrix(quaternion):
     
     return rotation_matrix
 
-def create_transform_matrix(position, quaternion):
+def create_transform_matrix(position, quaternion, lidar_offset=None):
     """
     Create 4x4 homogeneous transformation matrix from position and quaternion.
     
     Parameters:
         position: [x, y, z] position array
         quaternion: [x, y, z, w] quaternion array
+        lidar_offset: Optional [x, y, z, rx, ry, rz] offset from robot base to lidar
         
     Returns:
         np.array: 4x4 transformation matrix
@@ -56,6 +111,35 @@ def create_transform_matrix(position, quaternion):
     
     # Set translation part
     transform_matrix[:3, 3] = position
+    
+    # Apply lidar offset if provided
+    if lidar_offset is not None:
+        # Create lidar offset matrix
+        lidar_trans = lidar_offset[:3]  # Translation offset
+        if len(lidar_offset) > 3:
+            # Rotation offset (Euler angles in radians)
+            rx, ry, rz = lidar_offset[3:6]
+            # Create rotation matrix from Euler angles (ZYX convention)
+            cos_rx, sin_rx = np.cos(rx), np.sin(rx)
+            cos_ry, sin_ry = np.cos(ry), np.sin(ry)
+            cos_rz, sin_rz = np.cos(rz), np.sin(rz)
+            
+            # ZYX Euler angle rotation matrix
+            R_lidar = np.array([
+                [cos_ry*cos_rz, -cos_ry*sin_rz, sin_ry],
+                [sin_rx*sin_ry*cos_rz + cos_rx*sin_rz, -sin_rx*sin_ry*sin_rz + cos_rx*cos_rz, -sin_rx*cos_ry],
+                [-cos_rx*sin_ry*cos_rz + sin_rx*sin_rz, cos_rx*sin_ry*sin_rz + sin_rx*cos_rz, cos_rx*cos_ry]
+            ])
+        else:
+            R_lidar = np.eye(3)
+        
+        # Create lidar offset transformation matrix
+        lidar_offset_matrix = np.eye(4)
+        lidar_offset_matrix[:3, :3] = R_lidar
+        lidar_offset_matrix[:3, 3] = lidar_trans
+        
+        # Apply offset: T_world_lidar = T_world_robot * T_robot_lidar
+        transform_matrix = transform_matrix @ lidar_offset_matrix
     
     return transform_matrix
 
@@ -70,6 +154,19 @@ def apply_transform_to_points(points, transform_matrix):
     Returns:
         np.array: Transformed Nx3 points
     """
+    # Validate inputs
+    if points.shape[1] != 3:
+        raise ValueError(f"Points must have 3 columns (x, y, z), got {points.shape[1]}")
+    
+    if transform_matrix.shape != (4, 4):
+        raise ValueError(f"Transform matrix must be 4x4, got {transform_matrix.shape}")
+    
+    # Check for valid transformation matrix
+    det = np.linalg.det(transform_matrix[:3, :3])
+    if abs(det - 1.0) > 1e-3:
+        print(f"⚠️  Warning: Transformation matrix determinant is {det:.6f}, expected ~1.0")
+        print("   This may indicate scaling or reflection in the transformation")
+    
     # Convert to homogeneous coordinates
     num_points = points.shape[0]
     homogeneous_points = np.ones((num_points, 4))
@@ -79,7 +176,64 @@ def apply_transform_to_points(points, transform_matrix):
     transformed_homogeneous = (transform_matrix @ homogeneous_points.T).T
     
     # Convert back to 3D coordinates
-    return transformed_homogeneous[:, :3]
+    transformed_points = transformed_homogeneous[:, :3]
+    
+    # Validate output
+    if np.any(np.isnan(transformed_points)) or np.any(np.isinf(transformed_points)):
+        nan_count = np.isnan(transformed_points).sum()
+        inf_count = np.isinf(transformed_points).sum()
+        print(f"⚠️  Warning: Transformation produced {nan_count} NaN and {inf_count} inf values")
+    
+    return transformed_points
+
+def validate_coordinate_systems(points_before, points_after, transform_description=""):
+    """
+    Validate coordinate system transformation.
+    
+    Parameters:
+        points_before: Original points
+        points_after: Transformed points
+        transform_description: Description of the transformation
+    """
+    print(f"   🔍 Validating transformation: {transform_description}")
+    
+    # Check point count consistency
+    if len(points_before) != len(points_after):
+        print(f"   ❌ Point count mismatch: {len(points_before)} -> {len(points_after)}")
+        return False
+    
+    # Calculate transformation statistics
+    differences = points_after - points_before
+    translation_distances = np.linalg.norm(differences, axis=1)
+    
+    print(f"   • Mean translation distance: {np.mean(translation_distances):.3f} m")
+    print(f"   • Max translation distance: {np.max(translation_distances):.3f} m")
+    print(f"   • Min translation distance: {np.min(translation_distances):.3f} m")
+    
+    # Check for reasonable bounds
+    if np.max(translation_distances) > 1000:  # 1km threshold
+        print(f"   ⚠️  Warning: Large transformation distances detected (max: {np.max(translation_distances):.1f} m)")
+        print("   This may indicate coordinate system mismatch or incorrect odometry data")
+    
+    # Check coordinate ranges
+    for axis, name in enumerate(['X', 'Y', 'Z']):
+        before_range = np.max(points_before[:, axis]) - np.min(points_before[:, axis])
+        after_range = np.max(points_after[:, axis]) - np.min(points_after[:, axis])
+        range_change = abs(after_range - before_range) / max(before_range, 1e-6)
+        
+        if range_change > 0.1:  # 10% change threshold
+            print(f"   ⚠️  Warning: {name} axis range changed by {range_change*100:.1f}% ({before_range:.3f} -> {after_range:.3f})")
+    
+    # Check for height (Z) issues specifically
+    z_before_mean = np.mean(points_before[:, 2])
+    z_after_mean = np.mean(points_after[:, 2])
+    z_change = abs(z_after_mean - z_before_mean)
+    
+    if z_change > 2.0:  # 2 meter threshold
+        print(f"   ⚠️  Warning: Significant Z (height) change: {z_before_mean:.3f} -> {z_after_mean:.3f} m")
+        print("   This may indicate incorrect coordinate system assumptions")
+    
+    return True
 
 def interpolate_odometry_data(pc_timestamps, odom_timestamps, odom_positions, odom_orientations):
     """
@@ -135,26 +289,33 @@ def interpolate_odometry_data(pc_timestamps, odom_timestamps, odom_positions, od
             interp_z(pc_timestamps)
         ])
         
-        # For quaternions, we need special handling (SLERP would be ideal, but linear is simpler)
-        interp_qx = interp1d(odom_timestamps, odom_orientations[:, 0], 
-                            kind='linear', bounds_error=False, fill_value='extrapolate')
-        interp_qy = interp1d(odom_timestamps, odom_orientations[:, 1], 
-                            kind='linear', bounds_error=False, fill_value='extrapolate')
-        interp_qz = interp1d(odom_timestamps, odom_orientations[:, 2], 
-                            kind='linear', bounds_error=False, fill_value='extrapolate')
-        interp_qw = interp1d(odom_timestamps, odom_orientations[:, 3], 
-                            kind='linear', bounds_error=False, fill_value='extrapolate')
+        # For quaternions, we need special handling - use SLERP instead of linear interpolation
+        print("   🔄 Применение SLERP интерполяции для кватернионов...")
+        interpolated_orientations = np.zeros((len(pc_timestamps), 4))
         
-        interpolated_orientations = np.column_stack([
-            interp_qx(pc_timestamps),
-            interp_qy(pc_timestamps),
-            interp_qz(pc_timestamps),
-            interp_qw(pc_timestamps)
-        ])
-        
-        # Normalize quaternions after interpolation
-        norms = np.linalg.norm(interpolated_orientations, axis=1)
-        interpolated_orientations = interpolated_orientations / norms[:, np.newaxis]
+        for i, pc_time in enumerate(pc_timestamps):
+            # Find the closest odometry timestamps
+            if pc_time <= odom_timestamps[0]:
+                # Use first quaternion
+                interpolated_orientations[i] = odom_orientations[0]
+            elif pc_time >= odom_timestamps[-1]:
+                # Use last quaternion
+                interpolated_orientations[i] = odom_orientations[-1]
+            else:
+                # Find surrounding points for SLERP
+                idx = np.searchsorted(odom_timestamps, pc_time)
+                if idx == 0:
+                    idx = 1
+                
+                t1, t2 = odom_timestamps[idx-1], odom_timestamps[idx]
+                q1, q2 = odom_orientations[idx-1], odom_orientations[idx]
+                
+                # Calculate interpolation parameter
+                t = (pc_time - t1) / (t2 - t1) if t2 != t1 else 0.0
+                t = np.clip(t, 0.0, 1.0)
+                
+                # Apply SLERP
+                interpolated_orientations[i] = slerp_quaternions(q1, q2, t)
         
         print(f"   ✅ Интерполяция завершена для {len(pc_timestamps)} временных точек")
         
@@ -232,45 +393,501 @@ def calculate_total_distance(positions):
     distances = np.sqrt(np.sum(np.diff(positions, axis=0)**2, axis=1))
     return np.sum(distances)
 
+# ============================================================================
+# SLAM FUNCTIONS
+# ============================================================================
+
+class SimpleSLAM:
+    """
+    Simplified SLAM implementation for pose graph optimization and loop closure detection.
+    """
+    
+    def __init__(self, loop_closure_distance=2.0, min_time_gap=10.0):
+        """
+        Initialize SLAM parameters.
+        
+        Parameters:
+            loop_closure_distance: Maximum distance to consider for loop closure
+            min_time_gap: Minimum time gap between poses to consider for loop closure
+        """
+        self.loop_closure_distance = loop_closure_distance
+        self.min_time_gap = min_time_gap
+        self.poses = []  # List of poses [(timestamp, position, quaternion)]
+        self.odometry_edges = []  # Odometry constraints
+        self.loop_closure_edges = []  # Loop closure constraints
+        
+    def add_pose(self, timestamp, position, quaternion):
+        """Add a pose to the graph."""
+        pose_id = len(self.poses)
+        self.poses.append((timestamp, np.array(position), np.array(quaternion)))
+        
+        # Add odometry edge to previous pose
+        if pose_id > 0:
+            self.odometry_edges.append((pose_id - 1, pose_id))
+        
+        return pose_id
+    
+    def detect_loop_closures(self, point_clouds=None):
+        """
+        Detect loop closures based on distance and optionally point cloud similarity.
+        
+        Parameters:
+            point_clouds: Optional list of downsampled point clouds for each pose
+            
+        Returns:
+            List of loop closure constraints (pose1_id, pose2_id, confidence)
+        """
+        print("🔍 Поиск замыканий циклов...")
+        
+        loop_closures = []
+        num_poses = len(self.poses)
+        
+        if num_poses < 3:
+            print("   ⚠️  Недостаточно поз для поиска циклов")
+            return loop_closures
+        
+        # Build KDTree for efficient spatial queries
+        positions = np.array([pose[1] for pose in self.poses])
+        kdtree = KDTree(positions)
+        
+        for i in range(num_poses):
+            current_time = self.poses[i][0]
+            current_pos = self.poses[i][1]
+            
+            # Find nearby poses
+            nearby_indices = kdtree.query_ball_point(current_pos, self.loop_closure_distance)
+            
+            for j in nearby_indices:
+                if j <= i:  # Only look at previous poses
+                    continue
+                    
+                # Check time gap constraint
+                time_gap = abs(current_time - self.poses[j][0])
+                if time_gap < self.min_time_gap:
+                    continue
+                
+                # Calculate confidence based on distance
+                distance = np.linalg.norm(current_pos - self.poses[j][1])
+                confidence = max(0, 1.0 - distance / self.loop_closure_distance)
+                
+                # Additional point cloud similarity check if available
+                if point_clouds is not None and i < len(point_clouds) and j < len(point_clouds):
+                    pc_similarity = self._calculate_point_cloud_similarity(
+                        point_clouds[i], point_clouds[j]
+                    )
+                    confidence *= pc_similarity
+                
+                if confidence > 0.3:  # Threshold for accepting loop closure
+                    loop_closures.append((i, j, confidence))
+                    print(f"   � Loop closure: поза {i} ↔ поза {j} (confidence: {confidence:.3f})")
+        
+        print(f"   ✅ Найдено {len(loop_closures)} замыканий циклов")
+        self.loop_closure_edges = loop_closures
+        return loop_closures
+    
+    def _calculate_point_cloud_similarity(self, pc1, pc2, max_points=1000):
+        """
+        Calculate similarity between two point clouds.
+        
+        Parameters:
+            pc1, pc2: Point clouds as Nx3 arrays
+            max_points: Maximum number of points to use for comparison
+            
+        Returns:
+            Similarity score between 0 and 1
+        """
+        if pc1 is None or pc2 is None or len(pc1) == 0 or len(pc2) == 0:
+            return 0.0
+        
+        # Downsample for efficiency
+        if len(pc1) > max_points:
+            indices = np.random.choice(len(pc1), max_points, replace=False)
+            pc1 = pc1[indices]
+        
+        if len(pc2) > max_points:
+            indices = np.random.choice(len(pc2), max_points, replace=False)
+            pc2 = pc2[indices]
+        
+        try:
+            # Simple geometric feature comparison
+            # Calculate basic statistics for each point cloud
+            stats1 = self._calculate_geometric_features(pc1)
+            stats2 = self._calculate_geometric_features(pc2)
+            
+            # Compare features using normalized difference
+            feature_diff = np.abs(stats1 - stats2) / (np.abs(stats1) + np.abs(stats2) + 1e-6)
+            similarity = np.exp(-np.mean(feature_diff))
+            
+            return similarity
+            
+        except Exception as e:
+            print(f"   ⚠️  Ошибка сравнения облаков: {e}")
+            return 0.0
+    
+    def _calculate_geometric_features(self, pc):
+        """Calculate basic geometric features of a point cloud."""
+        if len(pc) == 0:
+            return np.zeros(6)
+        
+        # Basic statistics
+        mean_pos = np.mean(pc, axis=0)
+        std_pos = np.std(pc, axis=0)
+        
+        return np.concatenate([mean_pos, std_pos])
+    
+    def optimize_poses(self, max_iterations=50):
+        """
+        Optimize the pose graph using least squares optimization.
+        
+        Returns:
+            Optimized poses as list of (timestamp, position, quaternion)
+        """
+        print("🔧 Оптимизация графа поз...")
+        
+        if len(self.poses) < 2:
+            print("   ⚠️  Недостаточно поз для оптимизации")
+            return [pose for pose in self.poses]
+        
+        # Convert poses to optimization variables (x, y, z, qx, qy, qz, qw)
+        initial_params = []
+        for timestamp, position, quaternion in self.poses:
+            initial_params.extend(position)  # x, y, z
+            initial_params.extend(quaternion)  # qx, qy, qz, qw
+        
+        initial_params = np.array(initial_params)
+        
+        print(f"   📊 Оптимизация {len(self.poses)} поз с {len(self.odometry_edges)} одометрическими и {len(self.loop_closure_edges)} loop closure связями")
+        
+        try:
+            # Run optimization
+            result = least_squares(
+                self._pose_graph_residuals,
+                initial_params,
+                max_nfev=max_iterations * len(initial_params),
+                verbose=0
+            )
+            
+            if result.success:
+                print(f"   ✅ Оптимизация завершена за {result.nfev} итераций")
+                print(f"   📈 Снижение ошибки: {result.fun[0]:.6f} → {result.fun[-1]:.6f}")
+            else:
+                print(f"   ⚠️  Оптимизация не сошлась: {result.message}")
+            
+            # Extract optimized poses
+            optimized_poses = []
+            for i in range(len(self.poses)):
+                start_idx = i * 7
+                position = result.x[start_idx:start_idx+3]
+                quaternion = result.x[start_idx+3:start_idx+7]
+                
+                # Normalize quaternion
+                quaternion = quaternion / np.linalg.norm(quaternion)
+                
+                optimized_poses.append((
+                    self.poses[i][0],  # Keep original timestamp
+                    position,
+                    quaternion
+                ))
+            
+            return optimized_poses
+            
+        except Exception as e:
+            print(f"   ❌ Ошибка оптимизации: {e}")
+            return [pose for pose in self.poses]
+    
+    def _pose_graph_residuals(self, params):
+        """
+        Calculate residuals for pose graph optimization.
+        
+        Parameters:
+            params: Flattened array of pose parameters
+            
+        Returns:
+            Array of residuals
+        """
+        residuals = []
+        
+        # Extract poses from parameters
+        poses = []
+        for i in range(len(self.poses)):
+            start_idx = i * 7
+            position = params[start_idx:start_idx+3]
+            quaternion = params[start_idx+3:start_idx+7]
+            poses.append((position, quaternion))
+        
+        # Odometry constraints
+        for i, j in self.odometry_edges:
+            if i < len(poses) and j < len(poses):
+                # Calculate relative transformation
+                rel_trans = poses[j][0] - poses[i][0]
+                
+                # Expected transformation based on original odometry
+                expected_trans = self.poses[j][1] - self.poses[i][1]
+                
+                # Add residual for translation
+                trans_residual = rel_trans - expected_trans
+                residuals.extend(trans_residual)
+                
+                # Simple orientation constraint (could be improved)
+                orient_residual = poses[j][1][:3] - poses[i][1][:3]  # Simplified
+                residuals.extend(orient_residual * 0.1)  # Lower weight for orientation
+        
+        # Loop closure constraints
+        for i, j, confidence in self.loop_closure_edges:
+            if i < len(poses) and j < len(poses):
+                # Loop closure should minimize distance between poses
+                distance_residual = poses[i][0] - poses[j][0]
+                residuals.extend(distance_residual * confidence)
+        
+        return np.array(residuals)
+    
+    def calculate_trajectory_metrics(self, original_poses, optimized_poses):
+        """
+        Calculate metrics to evaluate trajectory improvement.
+        
+        Returns:
+            Dictionary with various metrics
+        """
+        if len(original_poses) != len(optimized_poses):
+            return {}
+        
+        # Calculate total trajectory length before and after
+        def trajectory_length(poses):
+            length = 0.0
+            for i in range(1, len(poses)):
+                length += np.linalg.norm(poses[i][1] - poses[i-1][1])
+            return length
+        
+        orig_length = trajectory_length(original_poses)
+        opt_length = trajectory_length(optimized_poses)
+        
+        # Calculate drift (distance between start and end if it should be a loop)
+        if len(self.loop_closure_edges) > 0:
+            orig_drift = np.linalg.norm(original_poses[-1][1] - original_poses[0][1])
+            opt_drift = np.linalg.norm(optimized_poses[-1][1] - optimized_poses[0][1])
+        else:
+            orig_drift = opt_drift = 0.0
+        
+        # Calculate average position change
+        pos_changes = []
+        for i in range(len(original_poses)):
+            change = np.linalg.norm(optimized_poses[i][1] - original_poses[i][1])
+            pos_changes.append(change)
+        
+        return {
+            'original_length': orig_length,
+            'optimized_length': opt_length,
+            'original_drift': orig_drift,
+            'optimized_drift': opt_drift,
+            'average_position_change': np.mean(pos_changes),
+            'max_position_change': np.max(pos_changes),
+            'loop_closures_found': len(self.loop_closure_edges)
+        }
+
+def apply_slam_optimization(odom_timestamps, odom_positions, odom_orientations, 
+                           point_clouds=None, enable_loop_closure=True):
+    """
+    Apply SLAM optimization to trajectory data.
+    
+    Parameters:
+        odom_timestamps: Array of timestamps
+        odom_positions: Nx3 array of positions
+        odom_orientations: Nx4 array of quaternions
+        point_clouds: Optional list of point clouds for loop closure detection
+        enable_loop_closure: Whether to perform loop closure detection
+        
+    Returns:
+        Tuple of (optimized_positions, optimized_orientations, metrics)
+    """
+    print("\n🤖 ПРИМЕНЕНИЕ SLAM ОПТИМИЗАЦИИ...")
+    print("-" * 50)
+    
+    # Initialize SLAM system
+    slam = SimpleSLAM(
+        loop_closure_distance=3.0,  # 3 meters for loop closure detection
+        min_time_gap=15.0           # 15 seconds minimum gap
+    )
+    
+    # Add all poses to the graph
+    print(f"📊 Добавление {len(odom_timestamps)} поз в граф...")
+    for i in range(len(odom_timestamps)):
+        slam.add_pose(odom_timestamps[i], odom_positions[i], odom_orientations[i])
+    
+    # Detect loop closures if enabled
+    if enable_loop_closure:
+        slam.detect_loop_closures(point_clouds)
+    else:
+        print("⚠️  Loop closure detection отключен")
+    
+    # Store original poses for comparison
+    original_poses = [(odom_timestamps[i], odom_positions[i], odom_orientations[i]) 
+                     for i in range(len(odom_timestamps))]
+    
+    # Optimize the pose graph
+    optimized_poses = slam.optimize_poses()
+    
+    # Extract optimized data
+    opt_positions = np.array([pose[1] for pose in optimized_poses])
+    opt_orientations = np.array([pose[2] for pose in optimized_poses])
+    
+    # Calculate metrics
+    metrics = slam.calculate_trajectory_metrics(original_poses, optimized_poses)
+    
+    # Print results
+    print(f"\n� РЕЗУЛЬТАТЫ SLAM ОПТИМИЗАЦИИ:")
+    print(f"   • Найдено loop closures: {metrics.get('loop_closures_found', 0)}")
+    print(f"   • Исходная длина траектории: {metrics.get('original_length', 0):.2f} м")
+    print(f"   • Оптимизированная длина: {metrics.get('optimized_length', 0):.2f} м")
+    if metrics.get('loop_closures_found', 0) > 0:
+        print(f"   • Исходный дрифт: {metrics.get('original_drift', 0):.3f} м")
+        print(f"   • Оптимизированный дрифт: {metrics.get('optimized_drift', 0):.3f} м")
+    print(f"   • Среднее изменение позиции: {metrics.get('average_position_change', 0):.3f} м")
+    print(f"   • Максимальное изменение: {metrics.get('max_position_change', 0):.3f} м")
+    
+    return opt_positions, opt_orientations, metrics
+
+def visualize_trajectory_comparison(original_positions, optimized_positions, slam_metrics, 
+                                  output_dir, bag_filename):
+    """
+    Create visualization comparing original and optimized trajectories.
+    
+    Parameters:
+        original_positions: Nx3 array of original positions
+        optimized_positions: Nx3 array of optimized positions  
+        slam_metrics: SLAM metrics dictionary
+        output_dir: Directory to save plots
+        bag_filename: Base filename for naming plots
+    """
+    try:
+        print("📊 Создание визуализации траекторий...")
+        
+        # Create figure with subplots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # Plot 1: 2D trajectory comparison (XY plane)
+        ax1.plot(original_positions[:, 0], original_positions[:, 1], 
+                'r-', alpha=0.7, linewidth=2, label='Исходная траектория')
+        ax1.plot(optimized_positions[:, 0], optimized_positions[:, 1], 
+                'b-', alpha=0.7, linewidth=2, label='Оптимизированная траектория')
+        ax1.scatter(original_positions[0, 0], original_positions[0, 1], 
+                   c='green', s=100, marker='o', label='Старт', zorder=5)
+        ax1.scatter(original_positions[-1, 0], original_positions[-1, 1], 
+                   c='red', s=100, marker='s', label='Финиш (исходный)', zorder=5)
+        ax1.scatter(optimized_positions[-1, 0], optimized_positions[-1, 1], 
+                   c='blue', s=100, marker='s', label='Финиш (оптимизированный)', zorder=5)
+        ax1.set_xlabel('X (м)')
+        ax1.set_ylabel('Y (м)')
+        ax1.set_title('Сравнение траекторий (вид сверху)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_aspect('equal')
+        
+        # Plot 2: Height profile
+        distances_orig = np.cumsum(np.concatenate([[0], np.sqrt(np.sum(np.diff(original_positions, axis=0)**2, axis=1))]))
+        distances_opt = np.cumsum(np.concatenate([[0], np.sqrt(np.sum(np.diff(optimized_positions, axis=0)**2, axis=1))]))
+        
+        ax2.plot(distances_orig, original_positions[:, 2], 'r-', alpha=0.7, linewidth=2, label='Исходная')
+        ax2.plot(distances_opt, optimized_positions[:, 2], 'b-', alpha=0.7, linewidth=2, label='Оптимизированная')
+        ax2.set_xlabel('Расстояние по траектории (м)')
+        ax2.set_ylabel('Высота Z (м)')
+        ax2.set_title('Профиль высоты')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Position corrections
+        position_changes = np.sqrt(np.sum((optimized_positions - original_positions)**2, axis=1))
+        ax3.plot(position_changes, 'g-', linewidth=2)
+        ax3.set_xlabel('Номер позиции')
+        ax3.set_ylabel('Величина коррекции (м)')
+        ax3.set_title('Коррекции позиций SLAM')
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Metrics summary
+        ax4.axis('off')
+        
+        # Prepare metrics text
+        metrics_text = f"""РЕЗУЛЬТАТЫ SLAM ОПТИМИЗАЦИИ:
+
+• Найдено замыканий циклов: {slam_metrics.get('loop_closures_found', 0)}
+
+• Длина траектории:
+  - Исходная: {slam_metrics.get('original_length', 0):.1f} м
+  - Оптимизированная: {slam_metrics.get('optimized_length', 0):.1f} м
+
+• Дрифт траектории:
+  - Исходный: {slam_metrics.get('original_drift', 0):.3f} м
+  - Оптимизированный: {slam_metrics.get('optimized_drift', 0):.3f} м
+
+• Коррекции позиций:
+  - Средняя: {slam_metrics.get('average_position_change', 0):.3f} м
+  - Максимальная: {slam_metrics.get('max_position_change', 0):.3f} м
+
+• Улучшения:
+  - Снижение дрифта: {((slam_metrics.get('original_drift', 1) - slam_metrics.get('optimized_drift', 1)) / max(slam_metrics.get('original_drift', 1), 0.001) * 100):.1f}%
+"""
+        
+        ax4.text(0.05, 0.95, metrics_text, transform=ax4.transAxes, fontsize=11,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = os.path.join(output_dir, f"{bag_filename}_slam_trajectory_comparison.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✅ Визуализация сохранена: {plot_filename}")
+        
+        return plot_filename
+        
+    except Exception as e:
+        print(f"   ⚠️  Ошибка создания визуализации: {e}")
+        return None
+
 def choose_transform_mode():
     """
     Interactive function to choose transformation mode.
     
     Returns:
-        str: Selected transformation mode
+        tuple: (transform_mode, enable_slam) 
     """
     print(f"\n🎯 ВЫБОР РЕЖИМА ТРАНСФОРМАЦИИ:")
     print("=" * 60)
     print("1. 🚫 Без трансформации (оригинальные координаты сенсора)")
     print("2. 🌍 Глобальная система координат (одометрия)")
-    print("3. 📍 Локальная система координат (относительно первого скана)")
-    print("4. ❌ Отмена")
+    print("3. 🌍 Глобальная система + SLAM оптимизация (рекомендуется)")
+    print("4. 📍 Локальная система координат (относительно первого скана)")
+    print("5. ❌ Отмена")
     print()
     
     while True:
         try:
-            choice = input("Выберите режим трансформации (1-4): ").strip()
+            choice = input("Выберите режим трансформации (1-5): ").strip()
             
             if choice == "1":
                 print("✅ Выбран режим: без трансформации")
-                return "none"
+                return "none", False
             elif choice == "2":
                 print("✅ Выбран режим: глобальная система координат")
-                return "global"
+                return "global", False
             elif choice == "3":
-                print("✅ Выбран режим: локальная система координат")
-                return "local"
+                print("✅ Выбран режим: глобальная система + SLAM оптимизация")
+                return "global", True
             elif choice == "4":
+                print("✅ Выбран режим: локальная система координат")
+                return "local", False
+            elif choice == "5":
                 print("❌ Отмена трансформации")
-                return "none"
+                return "none", False
             else:
-                print("❌ Неверный выбор. Введите число от 1 до 4")
+                print("❌ Неверный выбор. Введите число от 1 до 5")
                 
         except ValueError:
             print("❌ Ошибка ввода. Введите число")
         except KeyboardInterrupt:
             print("\n👋 Выбор прерван пользователем")
-            return "none"
+            return "none", False
 
 def get_pointcloud2_topics(bag_file):
     """
@@ -735,15 +1352,52 @@ def create_pos_file(bag_file, output_dir, odometry_topic):
         import traceback
         traceback.print_exc()
 
-def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode=None):
+def choose_express_mode():
     """
-    Function to convert PointCloud2 data from a ROS bag file to a LAZ file with optional transformation.
+    Ask user if they want to use express mode with default parameters.
+    
+    Returns:
+        bool: True if express mode selected
+    """
+    print(f"\n⚡ ЭКСПРЕСС-РЕЖИМ:")
+    print("=" * 60)
+    print("Использовать стандартные параметры?")
+    print("  • Топик облака точек: /cloud_registered")
+    print("  • Топик одометрии: /lio/odom")
+    print("  • Режим трансформации: Без трансформации")
+    print()
+    print("1. ⚡ Да, использовать экспресс-режим")
+    print("2. ⚙️  Нет, настроить вручную")
+    print()
+    
+    while True:
+        try:
+            choice = input("Выберите режим (1-2): ").strip()
+            
+            if choice == "1":
+                print("✅ Выбран экспресс-режим")
+                return True
+            elif choice == "2":
+                print("✅ Выбрана ручная настройка")
+                return False
+            else:
+                print("❌ Неверный выбор. Введите 1 или 2")
+                
+        except KeyboardInterrupt:
+            print("\n👋 Выбор прерван пользователем")
+            return False
+
+def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode=None, enable_slam=None, express_mode=False):
+    """
+    Function to convert PointCloud2 data from a ROS bag file to a LAZ file with optional transformation and SLAM optimization.
 
     Parameters:
         bag_file (str): Path to the ROS bag file.
         output_dir (str): Directory to save the generated LAZ files.
         selected_topic (str): Specific topic to process (if None, will prompt user to choose)
         transform_mode (str): Transformation mode ('none', 'global', 'local', None for user choice)
+        enable_slam (bool): Whether to enable SLAM optimization (None for user choice)
+        express_mode (bool): Use express mode with default parameters
     """
     try:
         print("="*80)
@@ -757,10 +1411,48 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
             print("❌ ERROR: Could not analyze bag file")
             return
         
-        # Wait for user to review the analysis
-        input("\n📋 Нажмите Enter для продолжения обработки...")
+        # Ask about express mode if not already set
+        if not express_mode and selected_topic is None:
+            express_mode = choose_express_mode()
         
-        # Choose the PointCloud2 topic
+        # Apply express mode defaults
+        if express_mode:
+            print("\n⚡ ПРИМЕНЕНИЕ ЭКСПРЕСС-РЕЖИМА...")
+            
+            # Check if default topics exist
+            available_pc_topics = get_pointcloud2_topics(bag_file)
+            available_odom_topics = get_odometry_topics(bag_file)
+            
+            # Set default pointcloud topic
+            if selected_topic is None:
+                if "/cloud_registered" in available_pc_topics:
+                    selected_topic = "/cloud_registered"
+                    print(f"✅ Топик облака точек: {selected_topic}")
+                else:
+                    print(f"⚠️  Топик /cloud_registered не найден")
+                    print(f"   Доступные топики: {list(available_pc_topics.keys())}")
+                    selected_topic = choose_pointcloud2_topic(bag_file)
+            
+            # Set default odometry topic
+            if "/lio/odom" in available_odom_topics:
+                odometry_topic = "/lio/odom"
+                print(f"✅ Топик одометрии: {odometry_topic}")
+            else:
+                print(f"⚠️  Топик /lio/odom не найден")
+                print(f"   Доступные топики: {list(available_odom_topics.keys())}")
+                odometry_topic = choose_odometry_topic(bag_file)
+            
+            # Set default transformation mode
+            if transform_mode is None:
+                transform_mode = "none"
+                enable_slam = False
+                print(f"✅ Режим трансформации: без трансформации")
+        else:
+            # Wait for user to review the analysis
+            input("\n📋 Нажмите Enter для продолжения обработки...")
+            odometry_topic = None
+        
+        # Choose the PointCloud2 topic (if not set by express mode)
         if selected_topic is None:
             pointcloud2_topic = choose_pointcloud2_topic(bag_file)
             if not pointcloud2_topic:
@@ -777,24 +1469,29 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
         
         print(f"✅ Processing topic: {pointcloud2_topic}")
         
-        # Choose odometry topic for .POS file and transformation
-        print(f"\n🧭 ПОИСК ТОПИКОВ ОДОМЕТРИИ...")
-        odometry_topic = choose_odometry_topic(bag_file)
+        # Choose odometry topic for .POS file and transformation (if not set by express mode)
+        if not express_mode:
+            print(f"\n🧭 ПОИСК ТОПИКОВ ОДОМЕТРИИ...")
+            odometry_topic = choose_odometry_topic(bag_file)
         
-        # Choose transformation mode
-        if transform_mode is None:
+        # Choose transformation mode (if not set by express mode)
+        if transform_mode is None or enable_slam is None:
             if odometry_topic:
-                transform_mode = choose_transform_mode()
+                transform_mode, enable_slam = choose_transform_mode()
             else:
                 print("⚠️  Нет топиков одометрии - трансформация недоступна")
                 transform_mode = "none"
+                enable_slam = False
         
         print(f"🔧 Режим трансформации: {transform_mode}")
+        if enable_slam:
+            print("🤖 SLAM оптимизация: включена")
         
         # Load odometry data if transformation is needed
         odom_timestamps = None
         odom_positions = None 
         odom_orientations = None
+        slam_metrics = None
         
         if transform_mode in ["global", "local"] and odometry_topic:
             print(f"\n🔄 ЗАГРУЗКА ДАННЫХ ОДОМЕТРИИ...")
@@ -803,6 +1500,18 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
             if odom_timestamps is None:
                 print("❌ Не удалось загрузить данные одометрии, используется режим без трансформации")
                 transform_mode = "none"
+                enable_slam = False
+            elif enable_slam and transform_mode == "global":
+                # Save original positions for visualization
+                odom_positions_original = odom_positions.copy()
+                odom_orientations_original = odom_orientations.copy()
+                
+                # Apply SLAM optimization
+                odom_positions, odom_orientations, slam_metrics = apply_slam_optimization(
+                    odom_timestamps, odom_positions, odom_orientations, 
+                    point_clouds=None,  # Will be populated during processing if needed
+                    enable_loop_closure=True
+                )
         
         # Get detailed topic information
         topic_details = get_topic_detailed_info(bag_file, pointcloud2_topic)
@@ -1182,6 +1891,9 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
                         elif transform_mode == "local":
                             print(f"      • Трансформация относительно первого скана")
                     
+                    # Store original points for validation
+                    original_msg_points = msg_points.copy() if msg_idx == 0 else None
+                    
                     # Apply transformation
                     msg_points = apply_transform_to_points(msg_points, transform_matrix)
                     
@@ -1190,6 +1902,14 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
                         # Show transformation result for first few points
                         for i in range(min(3, len(msg_points))):
                             print(f"         Point {i} after transform: ({msg_points[i, 0]:.6f}, {msg_points[i, 1]:.6f}, {msg_points[i, 2]:.6f})")
+                        
+                        # Validate transformation on first message
+                        if original_msg_points is not None:
+                            validate_coordinate_systems(
+                                original_msg_points, 
+                                msg_points, 
+                                f"{transform_mode} transformation"
+                            )
                 
                 # Add transformed points to global lists
                 x_list.extend(msg_points[:, 0])
@@ -1353,24 +2073,15 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
         if has_intensity:
             if point_format in [1]:  # Only format 1 officially supports intensity
                 print(f"⚙️  Processing intensity data...")
-                # Normalize intensity to 16-bit range if needed
+                # Keep intensity in original format
                 max_intensity = np.max(intensity_array)
                 min_intensity = np.min(intensity_array)
                 print(f"   • Original intensity range: {min_intensity:.3f} to {max_intensity:.3f}")
                 print(f"   • Unique intensity values: {len(np.unique(intensity_array)):,}")
                 
-                if max_intensity <= 1.0:
-                    # Assume normalized intensity, scale to 16-bit
-                    out_las.intensity = (intensity_array * 65535).astype(np.uint16)
-                    print(f"   • Scaled from [0,1] to [0,65535]")
-                elif max_intensity <= 255:
-                    # 8-bit intensity, scale to 16-bit
-                    out_las.intensity = (intensity_array * 257).astype(np.uint16)
-                    print(f"   • Scaled from [0,255] to [0,65535]")
-                else:
-                    # Assume already in appropriate range
-                    out_las.intensity = intensity_array.astype(np.uint16)
-                    print(f"   • Used as-is (assumed 16-bit)")
+                # Use intensity as-is without scaling
+                out_las.intensity = intensity_array.astype(np.uint16)
+                print(f"   • Intensity used as-is (original values)")
                 print(f"   ✅ Intensity data added successfully")
             else:
                 print(f"   ⚠️  WARNING: Point format {point_format} doesn't support intensity field")
@@ -1486,18 +2197,25 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
                 print(f"   • Estimated scan duration: {estimated_duration:.1f} seconds")
                 print(f"   • Time span vs estimated: {time_diff:.1f}s vs {estimated_duration:.1f}s")
             
-            # Check if GPS time values are reasonable
+            # Check if GPS time values are reasonable and normalize if needed
             if np.all(gps_time_array == 0):
                 print("   ⚠️  WARNING: All GPS time values are zero")
-            elif np.max(gps_time_array) < 1000:
+            elif np.max(gps_time_array) < 1:
                 print("   ⚠️  WARNING: GPS time values seem to be relative (too small)")
-            elif np.min(gps_time_array) > 1e9:
-                print("   ℹ️  GPS time appears to be Unix timestamp")
-                # Convert to GPS time if it's Unix timestamp
-                unix_epoch_to_gps = 315964800  # seconds between Unix epoch and GPS epoch
-                print("   🔄 Converting Unix timestamp to GPS time...")
-                gps_time_array = gps_time_array - unix_epoch_to_gps
-                print(f"   • GPS time after conversion: {np.min(gps_time_array):.6f} to {np.max(gps_time_array):.6f}")
+            elif np.min(gps_time_array) > 100:
+                # Always normalize large GPS time values for CloudCompare compatibility
+                print("   ℹ️  GPS time values are large - normalizing for CloudCompare compatibility")
+                min_gps_time = np.min(gps_time_array)
+                max_gps_time_orig = np.max(gps_time_array)
+                gps_time_array = gps_time_array - min_gps_time
+                print(f"   🔄 Normalizing GPS time to relative values starting from 0...")
+                print(f"   • Original range: {min_gps_time:.6f} to {max_gps_time_orig:.6f}")
+                print(f"   • Normalized range: 0.0 to {np.max(gps_time_array):.6f}")
+                print(f"   • Duration: {np.max(gps_time_array):.2f} seconds ({np.max(gps_time_array)/60:.2f} minutes)")
+                print(f"   • This allows proper time-based filtering in CloudCompare")
+            else:
+                print(f"   ℹ️  GPS time values are in reasonable range (0-100)")
+                print(f"   • Range: {np.min(gps_time_array):.6f} to {np.max(gps_time_array):.6f}")
             
             try:
                 # Ensure GPS time is in the correct format for LAS
@@ -1569,6 +2287,28 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
                 print(f"   🌍 Point cloud transformed using odometry data")
                 if transform_mode == "global":
                     print(f"   📍 Coordinates in global odometry frame")
+                    if enable_slam and slam_metrics:
+                        print(f"   🤖 SLAM optimization applied:")
+                        print(f"      • Loop closures found: {slam_metrics.get('loop_closures_found', 0)}")
+                        print(f"      • Average position correction: {slam_metrics.get('average_position_change', 0):.3f} m")
+                        if slam_metrics.get('loop_closures_found', 0) > 0:
+                            print(f"      • Drift reduction: {slam_metrics.get('original_drift', 0):.3f} → {slam_metrics.get('optimized_drift', 0):.3f} m")
+                        
+                        # Create trajectory visualization if SLAM was applied
+                        try:
+                            print(f"\n📊 Создание визуализации траектории SLAM...")
+                            # Get original positions from loaded odometry
+                            if 'odom_positions_original' in locals() and slam_metrics:
+                                plot_file = visualize_trajectory_comparison(
+                                    odom_positions_original, odom_positions, slam_metrics,
+                                    output_dir, base_filename
+                                )
+                                if plot_file:
+                                    print(f"   ✅ График сохранен: {plot_file}")
+                            else:
+                                print(f"   ⚠️  Визуализация недоступна: отсутствуют исходные данные траектории")
+                        except Exception as viz_error:
+                            print(f"   ⚠️  Ошибка создания визуализации: {viz_error}")
                 elif transform_mode == "local":
                     print(f"   📍 Coordinates relative to first scan position")
             else:
@@ -1876,7 +2616,7 @@ def get_user_choice():
         except Exception as e:
             print(f"❌ Ошибка ввода: {e}")
 
-def process_single_file(bag_file_path, output_dir=None, selected_topic=None, transform_mode=None):
+def process_single_file(bag_file_path, output_dir=None, selected_topic=None, transform_mode=None, enable_slam=None):
     """
     Обработка одного .bag файла
     
@@ -1885,6 +2625,7 @@ def process_single_file(bag_file_path, output_dir=None, selected_topic=None, tra
         output_dir (str): Директория для сохранения (по умолчанию - рядом с исходным файлом)
         selected_topic (str): Выбранный топик (если None, будет предложен выбор)
         transform_mode (str): Режим трансформации (None для выбора пользователем)
+        enable_slam (bool): Включить SLAM оптимизацию (None для выбора пользователем)
     """
     if output_dir is None:
         # Использовать директорию исходного файла
@@ -1901,7 +2642,7 @@ def process_single_file(bag_file_path, output_dir=None, selected_topic=None, tra
     
     try:
         start_time = time.time()
-        convert_bag_to_laz(bag_file_path, output_dir, selected_topic, transform_mode)
+        convert_bag_to_laz(bag_file_path, output_dir, selected_topic, transform_mode, enable_slam)
         elapsed_time = time.time() - start_time
         
         print(f"\n🎉 ФАЙЛ УСПЕШНО ОБРАБОТАН!")
@@ -1925,7 +2666,7 @@ def process_single_file(bag_file_path, output_dir=None, selected_topic=None, tra
         traceback.print_exc()
         return False
 
-def process_directory(bag_directory, output_dir, selected_topic=None, transform_mode=None):
+def process_directory(bag_directory, output_dir, selected_topic=None, transform_mode=None, enable_slam=None):
     """
     Обработка всех .bag файлов в директории
     
@@ -1934,6 +2675,7 @@ def process_directory(bag_directory, output_dir, selected_topic=None, transform_
         output_dir (str): Директория для сохранения результатов
         selected_topic (str): Выбранный топик для всех файлов (если None, будет предложен выбор для каждого)
         transform_mode (str): Режим трансформации для всех файлов (None для выбора пользователем)
+        enable_slam (bool): Включить SLAM оптимизацию для всех файлов (None для выбора пользователем)
     """
     print(f"🎯 ОБРАБОТКА ДИРЕКТОРИИ")
     print("=" * 60)
@@ -1994,7 +2736,7 @@ def process_directory(bag_directory, output_dir, selected_topic=None, transform_
             topic_for_this_file = selected_topic if use_same_topic_for_all else None
             
             file_start_time = time.time()
-            convert_bag_to_laz(bag_file_path, output_dir, topic_for_this_file, transform_mode)
+            convert_bag_to_laz(bag_file_path, output_dir, topic_for_this_file, transform_mode, enable_slam)
             file_elapsed = time.time() - file_start_time
             
             print(f"\n✅ Файл обработан за {int(file_elapsed//60):02d}:{int(file_elapsed%60):02d}")
@@ -2059,6 +2801,15 @@ if __name__ == "__main__":
             print(f"\n🎉 ПРОГРАММА ЗАВЕРШЕНА УСПЕШНО!")
         else:
             print(f"\n❌ ПРОГРАММА ЗАВЕРШЕНА С ОШИБКАМИ")
+            
+    except KeyboardInterrupt:
+        print(f"\n👋 Программа прервана пользователем")
+    except Exception as e:
+        print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
+        # else:
+        #     print(f"\n❌ ПРОГРАММА ЗАВЕРШЕНА С ОШИБКАМИ")
             
     except KeyboardInterrupt:
         print(f"\n👋 Программа прервана пользователем")
