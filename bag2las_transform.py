@@ -235,6 +235,77 @@ def validate_coordinate_systems(points_before, points_after, transform_descripti
     
     return True
 
+def calculate_optimal_scale_offset(coords_array):
+    """
+    Автоматически вычисляет оптимальные scale и offset для LAS файла.
+    Обеспечивает кросс-платформенную совместимость (macOS/Ubuntu).
+    
+    Parameters:
+        coords_array: numpy array координат (x, y или z)
+    
+    Returns:
+        (scale, offset): оптимальные значения для LAS формата
+    """
+    # Используем float64 явно для кросс-платформенной совместимости
+    min_val = np.float64(np.min(coords_array))
+    max_val = np.float64(np.max(coords_array))
+    
+    # Диапазон координат
+    coord_range = max_val - min_val
+    
+    # LAS использует 32-bit signed integer: -2,147,483,648 to 2,147,483,647
+    # Безопасный диапазон: ±2,000,000,000 (оставляем запас)
+    MAX_INT32 = 2_000_000_000
+    
+    # Вычисляем минимальный scale для покрытия диапазона
+    required_scale = coord_range / MAX_INT32 if coord_range > 0 else 0.001
+    
+    # Округляем до стандартных значений: 0.001, 0.01, 0.1, 1.0
+    if required_scale <= 0.001:
+        scale = 0.001  # 1mm точность
+    elif required_scale <= 0.01:
+        scale = 0.01   # 1cm точность
+    elif required_scale <= 0.1:
+        scale = 0.1    # 10cm точность
+    else:
+        scale = 1.0    # 1m точность
+    
+    # Offset - используем минимальное значение
+    # Округляем до целых метров для стабильности на разных платформах
+    offset = np.float64(np.floor(min_val))
+    
+    return scale, offset
+
+def validate_las_encoding(coords, offset, scale, coord_name="coordinate"):
+    """
+    Проверяет, что координаты корректно кодируются в LAS формат.
+    Предотвращает переполнение int32 на любой платформе.
+    
+    Parameters:
+        coords: numpy array координат
+        offset: LAS offset значение
+        scale: LAS scale значение
+        coord_name: название координаты для логирования
+        
+    Returns:
+        bool: True если кодирование корректно
+        
+    Raises:
+        ValueError: если координаты не влезают в int32
+    """
+    encoded = ((coords - offset) / scale).astype(np.int64)
+    min_encoded = np.min(encoded)
+    max_encoded = np.max(encoded)
+    
+    if max_encoded > 2_147_483_647 or min_encoded < -2_147_483_648:
+        raise ValueError(
+            f"{coord_name} не влезает в int32! "
+            f"Range: {min_encoded} to {max_encoded} "
+            f"(допустимо: -2,147,483,648 to 2,147,483,647)"
+        )
+    
+    return True
+
 def interpolate_odometry_data(pc_timestamps, odom_timestamps, odom_positions, odom_orientations):
     """
     Interpolate odometry data to match pointcloud timestamps.
@@ -2249,11 +2320,41 @@ def convert_bag_to_laz(bag_file, output_dir, selected_topic=None, transform_mode
                 traceback.print_exc()
 
         print(f"⚙️  Setting LAS header parameters...")
-        # Set proper header values
-        out_las.header.offset = [np.min(x_array), np.min(y_array), np.min(z_array)]
-        out_las.header.scale = [0.001, 0.001, 0.001]  # 1mm precision
-        print(f"   • Offset: [{out_las.header.offset[0]:.6f}, {out_las.header.offset[1]:.6f}, {out_las.header.offset[2]:.6f}]")
-        print(f"   • Scale: [{out_las.header.scale[0]}, {out_las.header.scale[1]}, {out_las.header.scale[2]}]")
+        
+        # Автоматический расчет оптимальных scale и offset
+        # Это обеспечивает кросс-платформенную совместимость (macOS/Ubuntu)
+        print(f"   🔧 Calculating optimal scale and offset for each axis...")
+        
+        x_scale, x_offset = calculate_optimal_scale_offset(x_array)
+        y_scale, y_offset = calculate_optimal_scale_offset(y_array)
+        z_scale, z_offset = calculate_optimal_scale_offset(z_array)
+        
+        # Set proper header values with explicit type conversion for cross-platform compatibility
+        out_las.header.offset = [
+            np.float64(x_offset).item(),  # .item() конвертирует в Python float
+            np.float64(y_offset).item(),
+            np.float64(z_offset).item()
+        ]
+        out_las.header.scale = [
+            np.float64(x_scale).item(),
+            np.float64(y_scale).item(),
+            np.float64(z_scale).item()
+        ]
+        
+        print(f"   ✅ X: range [{np.min(x_array):.2f}, {np.max(x_array):.2f}] → scale={x_scale}, offset={x_offset:.2f}")
+        print(f"   ✅ Y: range [{np.min(y_array):.2f}, {np.max(y_array):.2f}] → scale={y_scale}, offset={y_offset:.2f}")
+        print(f"   ✅ Z: range [{np.min(z_array):.2f}, {np.max(z_array):.2f}] → scale={z_scale}, offset={z_offset:.2f}")
+        
+        # Validate that coordinates will encode correctly in LAS format
+        print(f"   🔍 Validating LAS encoding for int32 compatibility...")
+        try:
+            validate_las_encoding(x_array, x_offset, x_scale, "X coordinate")
+            validate_las_encoding(y_array, y_offset, y_scale, "Y coordinate")
+            validate_las_encoding(z_array, z_offset, z_scale, "Z coordinate")
+            print(f"   ✅ All coordinates will encode correctly in LAS format")
+        except ValueError as e:
+            print(f"   ❌ ERROR: {e}")
+            print(f"   💡 Consider using a larger scale value or check coordinate ranges")
         
         # No RGB values - skip RGB assignment entirely
         print(f"   ℹ️  No RGB data (point cloud contains no color information)")
