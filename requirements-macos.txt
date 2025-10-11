@@ -1,0 +1,15 @@
+# Зависимости для macOS (без системного ROS)
+numpy>=1.19.0
+scipy>=1.5.0
+scikit-learn>=0.24.0
+matplotlib>=3.3.0
+laspy>=2.0.0
+lazrs>=0.4.0
+
+# ROS пакеты через rospypi
+--extra-index-url https://rospypi.github.io/simple/
+rospy>=1.15.0
+rosbag>=1.15.0
+sensor-msgs>=1.13.0
+geometry-msgs>=1.13.0
+nav-msgs>=1.13.0

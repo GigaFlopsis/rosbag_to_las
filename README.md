@@ -32,32 +32,35 @@ Advanced Python utility for converting ROS bag files containing PointCloud2 data
 
 ## Prerequisites
 
-### Required Python Packages
-```shell
-pip install laspy numpy scipy scikit-learn matplotlib
-```
+### ⚡ Quick Start Options
 
-### ROS Dependencies (for ROS bag conversion)
-```shell
-# Ubuntu/Linux
-sudo apt install ros-noetic-desktop-full
+1. **Docker (Easiest)** - Works on all platforms with zero dependency issues
+2. **Auto-installer** - Platform-specific automatic setup (`install.sh` / `install.bat`)
+3. **Manual** - Traditional pip install for advanced users
 
-# macOS (via rospypi)
-pip install --extra-index-url https://rospypi.github.io/simple/ rospy rosbag geometry_msgs sensor_msgs nav_msgs
-```
+### Core Dependencies
+- Python 3.6+
+- numpy, scipy, scikit-learn, matplotlib
+- laspy (LAS/LAZ file handling)
+- lazrs or laszip (LAZ compression)
+- ROS packages (rosbag, sensor_msgs) - installed automatically
 
-### LAZ Compression Backend (choose one)
-```shell
-pip install lazrs  # Recommended
-# or
-pip install laszip
-```
+**📚 See [INSTALL.md](INSTALL.md) for detailed platform-specific instructions**
 
 ## Installation
 ```shell
 git clone https://github.com/eddie3ruff/bag2laz.git
 cd bag2laz
+
+# Use automatic installer (recommended)
+./install.sh  # macOS/Linux
+# or install.bat on Windows
+
+# Or install manually
+pip install -r requirements.txt  # or requirements-macos.txt / requirements-linux.txt
 ```
+
+**💡 First time user?** See [INSTALL.md](INSTALL.md) for platform-specific guide
 
 ## Usage
 
@@ -123,20 +126,47 @@ Contributions are welcome! Please fork the repository, make changes, and submit 
 
 ---
 
-## Installation Notes
+## Installation
 
-### macOS Setup
+### 🚀 Quick Install (Recommended)
 
-```shell
-pip install --extra-index-url https://rospypi.github.io/simple/ rospy rosbag geometry_msgs sensor_msgs
+#### Automatic Installation:
+```bash
+# macOS / Linux
+chmod +x install.sh
+./install.sh
+
+# Windows
+install.bat
 ```
 
-# Установите один из LAZ бэкендов
-pip install lazrs
-# или
-pip install laszip
-  scikit-learn
-  scipy
-  matplotlib
-  numpy
-  laspy
+#### Docker (Universal Solution):
+```bash
+docker build -t rosbag_to_las .
+docker run -it -v $(pwd)/data:/data rosbag_to_las
+```
+
+### 📋 Manual Installation
+
+#### macOS:
+```bash
+pip install -r requirements-macos.txt
+```
+
+#### Linux:
+```bash
+# With system ROS (recommended)
+sudo apt install ros-noetic-desktop-full
+source /opt/ros/noetic/setup.bash
+pip install -r requirements-linux.txt
+
+# Without system ROS
+pip install -r requirements.txt
+```
+
+#### Windows:
+```bash
+pip install -r requirements.txt
+```
+
+**📚 Detailed installation guide:** [INSTALL.md](INSTALL.md)

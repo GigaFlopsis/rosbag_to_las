@@ -1,0 +1,21 @@
+# Core dependencies (работают на всех платформах)
+numpy>=1.19.0
+scipy>=1.5.0
+scikit-learn>=0.24.0
+matplotlib>=3.3.0
+laspy>=2.0.0
+
+# LAZ compression backend (выберите один)
+# Рекомендуется: lazrs (быстрее и проще в установке)
+lazrs>=0.4.0
+# Альтернатива: laszip (раскомментируйте если lazrs не работает)
+# laszip>=0.1.0
+
+# ROS dependencies (только для macOS через rospypi)
+# Для Linux: используйте системный ROS (apt install ros-noetic-*)
+# Для macOS: автоматически установится из rospypi
+--extra-index-url https://rospypi.github.io/simple/
+rospy>=1.15.0
+rosbag>=1.15.0
+sensor-msgs>=1.13.0
+geometry-msgs>=1.13.0

@@ -1,0 +1,59 @@
+# Современная конфигурация Python проекта (PEP 518)
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosbag_to_las"
+version = "2.0.0"
+description = "ROS Bag to LAS/LAZ converter with SLAM optimization"
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [
+    {name = "Eddie3ruff", email = "your.email@example.com"}
+]
+keywords = ["ros", "point cloud", "lidar", "slam", "las", "laz"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: GIS",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    "numpy>=1.19.0",
+    "scipy>=1.5.0",
+    "scikit-learn>=0.24.0",
+    "matplotlib>=3.3.0",
+    "laspy>=2.0.0",
+    "lazrs>=0.4.0",
+]
+
+[project.optional-dependencies]
+# ROS для macOS
+macos = [
+    "rospy>=1.15.0",
+    "rosbag>=1.15.0",
+    "sensor-msgs>=1.13.0",
+    "geometry-msgs>=1.13.0",
+    "nav-msgs>=1.13.0",
+]
+
+# Альтернативный LAZ бэкенд
+laszip = [
+    "laszip>=0.1.0",
+]
+
+# Все зависимости для разработки
+dev = [
+    "pytest>=6.0",
+    "black>=21.0",
+    "flake8>=3.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/eddie3ruff/bag2laz"
+Documentation = "https://github.com/eddie3ruff/bag2laz/blob/main/README.md"
+Repository = "https://github.com/eddie3ruff/bag2laz"

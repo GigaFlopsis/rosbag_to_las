@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  rosbag_to_las:
+    build: .
+    image: rosbag_to_las:latest
+    container_name: rosbag_converter
+    volumes:
+      # Монтируем локальную директорию с данными
+      - ./data:/data
+      # Монтируем скрипты для разработки (опционально)
+      - ./bag2las.py:/workspace/bag2las.py
+      - ./bag2las_transform.py:/workspace/bag2las_transform.py
+    environment:
+      - ROS_DISTRO=noetic
+      - PYTHONUNBUFFERED=1
+    # Интерактивный режим
+    stdin_open: true
+    tty: true
+    # Команда по умолчанию
+    command: python3 bag2las_transform.py
+
+# Использование:
+#
+# Запуск:
+#   docker-compose up
+#
+# Интерактивный режим:
+#   docker-compose run --rm rosbag_to_las bash
+#
+# Остановка:
+#   docker-compose down
