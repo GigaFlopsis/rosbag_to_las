@@ -213,7 +213,5 @@ test.bag
 test.bag
 
 # Test output files  
-test_camera_positions.*
-camera_debug_test.json
 *.backup
 
